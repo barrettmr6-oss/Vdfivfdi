@@ -1,0 +1,174 @@
+-- ONE FULL LUA SCRIPT: LocalScript inside your Radar frame
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local CollectionService = game:GetService("CollectionService")
+
+local localPlayer = Players.LocalPlayer
+local camera = workspace.CurrentCamera
+
+local radarFrame = script.Parent
+local dotTemplate = radarFrame:WaitForChild("DotTemplate")
+local headingTemplate = radarFrame:WaitForChild("HeadingLineTemplate")
+local labelTemplate = radarFrame:WaitForChild("LabelTemplate")
+local sweepLine = radarFrame:WaitForChild("SweepLine")
+
+-- === CONFIG ===
+local RADAR_TAG = "RadarPlane"    -- planes must be tagged with this on the server
+local RADAR_RANGE = 6000          -- studs lateral
+local ALT_LOW = 2000              -- ft
+local ALT_HIGH = 8000             -- ft
+local SWEEP_SPEED = 60            -- degrees per second
+
+-- set to true if you want fixed ATC camera instead of normal player camera
+local USE_FIXED_ATC_CAMERA = false
+local ATC_POSITION = Vector3.new(0, 1200, 0)  -- position of ATC camera
+local ATC_LOOK_AT = Vector3.new(0, 0, 0)      -- where ATC camera looks
+
+-- === HELPERS ===
+
+local function getPlayerRoot()
+    local char = localPlayer.Character
+    if not char then
+        return nil
+    end
+    return char:FindFirstChild("HumanoidRootPart")
+end
+
+local function getAircraftList()
+    return CollectionService:GetTagged(RADAR_TAG)
+end
+
+local function clearRadarDraw()
+    for _, child in ipairs(radarFrame:GetChildren()) do
+        if child:IsA("Frame") or child:IsA("TextLabel") then
+            if child.Name == "Dot" or child.Name == "Heading" or child.Name == "Callsign" then
+                child:Destroy()
+            end
+        end
+    end
+end
+
+local function altitudeToColor(altFt)
+    if altFt <= ALT_LOW then
+        return Color3.fromRGB(0, 255, 0)      -- low
+    elseif altFt <= ALT_HIGH then
+        return Color3.fromRGB(255, 255, 0)    -- medium
+    else
+        return Color3.fromRGB(255, 0, 0)      -- high
+    end
+end
+
+local function getAltitudeFt(yPos)
+    -- 1 stud ≈ 3.28 ft (adjust if your map scale is different)
+    return yPos * 3.28
+end
+
+local function getHeading(cf)
+    local look = cf.LookVector
+    return math.atan2(look.X, -look.Z)
+end
+
+-- Optional fixed ATC camera
+if USE_FIXED_ATC_CAMERA then
+    camera.CameraType = Enum.CameraType.Scriptable
+    RunService.RenderStepped:Connect(function()
+        camera.CFrame = CFrame.new(ATC_POSITION, ATC_LOOK_AT)
+    end)
+end
+
+-- === MAIN LOOP ===
+
+local sweepAngle = 0
+
+RunService.RenderStepped:Connect(function(dt)
+    local root = getPlayerRoot()
+    if not root then
+        return
+    end
+
+    clearRadarDraw()
+
+    local size = radarFrame.AbsoluteSize
+    local radius = math.min(size.X, size.Y) * 0.5
+    local center = Vector2.new(size.X * 0.5, size.Y * 0.5)
+
+    -- rotate radar with camera yaw so up = where ATC looks
+    local _, yaw, _ = camera.CFrame:ToOrientation()
+    local yawC = math.cos(-yaw)
+    local yawS = math.sin(-yaw)
+
+    -- sweep line rotation
+    sweepAngle = (sweepAngle + SWEEP_SPEED * dt) % 360
+    sweepLine.AnchorPoint = Vector2.new(0.5, 1)
+    sweepLine.Position = UDim2.fromScale(0.5, 0.5)
+    sweepLine.Rotation = sweepAngle
+
+    for _, plane in ipairs(getAircraftList()) do
+        if plane:IsA("Model") then
+            local primary = plane.PrimaryPart or plane:FindFirstChild("PrimaryPart")
+            if primary and plane ~= root.Parent then
+                local offset = primary.Position - root.Position
+                local flatOffset = Vector3.new(offset.X, 0, offset.Z)
+                local dist = flatOffset.Magnitude
+
+                if dist <= RADAR_RANGE and dist > 1 then
+                    local x = flatOffset.X / RADAR_RANGE
+                    local z = flatOffset.Z / RADAR_RANGE
+
+                    -- rotate into radar space
+                    local rx = x * yawC - z * yawS
+                    local rz = x * yawS + z * yawC
+
+                    local pos2D = center + Vector2.new(rx, rz) * radius
+
+                    local altFt = getAltitudeFt(primary.Position.Y)
+                    local color = altitudeToColor(altFt)
+
+                    -- DOT
+                    local dot = dotTemplate:Clone()
+                    dot.Name = "Dot"
+                    dot.Visible = true
+                    dot.BackgroundColor3 = color
+
+                    local dotSizeX = dotTemplate.Size.X.Offset
+                    local dotSizeY = dotTemplate.Size.Y.Offset
+
+                    dot.Position = UDim2.fromOffset(
+                        pos2D.X - dotSizeX / 2,
+                        pos2D.Y - dotSizeY / 2
+                    )
+
+                    dot.Parent = radarFrame
+
+                    -- HEADING LINE (from radar center showing aircraft heading)
+                    local headingRad = getHeading(primary.CFrame)
+                    local headingDeg = math.deg(headingRad)
+
+                    local headingLine = headingTemplate:Clone()
+                    headingLine.Name = "Heading"
+                    headingLine.Visible = true
+                    headingLine.BackgroundColor3 = color
+                    headingLine.AnchorPoint = Vector2.new(0.5, 1)
+                    headingLine.Position = UDim2.fromOffset(center.X, center.Y)
+                    headingLine.Rotation = headingDeg + math.deg(yaw)
+                    headingLine.Parent = radarFrame
+
+                    -- LABEL (callsign + squawk)
+                    local label = labelTemplate:Clone()
+                    label.Name = "Callsign"
+                    label.Visible = true
+                    label.TextColor3 = color
+
+                    local cs = plane:GetAttribute("Callsign") or plane.Name
+                    local sq = plane:GetAttribute("Squawk") or 0
+                    label.Text = string.format("%s  %04d", cs, sq)
+
+                    label.Position = UDim2.fromOffset(pos2D.X + 6, pos2D.Y - 14)
+                    label.Parent = radarFrame
+                end
+            end
+        end
+    end
+end)
+                         
